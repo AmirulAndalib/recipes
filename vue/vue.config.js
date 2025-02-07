@@ -29,10 +29,6 @@ const pages = {
         entry: "./src/apps/ExportView/main.js",
         chunks: ["chunk-vendors","locales-chunk","api-chunk"],
     },
-    supermarket_view: {
-        entry: "./src/apps/SupermarketView/main.js",
-        chunks: ["chunk-vendors","locales-chunk","api-chunk"],
-    },
     model_list_view: {
         entry: "./src/apps/ModelListView/main.js",
         chunks: ["chunk-vendors","locales-chunk","api-chunk"],
@@ -53,16 +49,16 @@ const pages = {
         entry: "./src/apps/IngredientEditorView/main.js",
         chunks: ["chunk-vendors","locales-chunk","api-chunk"],
     },
+    property_editor_view: {
+        entry: "./src/apps/PropertyEditorView/main.js",
+        chunks: ["chunk-vendors","locales-chunk","api-chunk"],
+    },
     shopping_list_view: {
         entry: "./src/apps/ShoppingListView/main.js",
         chunks: ["chunk-vendors","locales-chunk","api-chunk"],
     },
     space_manage_view: {
         entry: "./src/apps/SpaceManageView/main.js",
-        chunks: ["chunk-vendors","locales-chunk","api-chunk"],
-    },
-    profile_view: {
-        entry: "./src/apps/ProfileView/main.js",
         chunks: ["chunk-vendors","locales-chunk","api-chunk"],
     },
     settings_view: {
@@ -137,7 +133,7 @@ module.exports = {
 
         config.optimization.minimize(true)
 
-        //TODO somehow remov them as they are also added to the manifest config of the service worker
+        //TODO somehow remove them as they are also added to the manifest config of the service worker
         /*
         Object.keys(pages).forEach(page => {
             config.plugins.delete(`html-${page}`);
