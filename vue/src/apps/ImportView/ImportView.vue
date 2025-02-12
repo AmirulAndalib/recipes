@@ -83,6 +83,11 @@
                                 <loading-spinner></loading-spinner>
                             </b-card>
 
+                            <!-- Warnings -->
+                            <b-card no-body v-if="duplicateWarning" class="warning">
+                                {{ duplicateWarning }}
+                            </b-card>
+
                             <!-- OPTIONS -->
                             <b-card no-body v-if="recipe_json !== undefined">
                                 <b-card-header header-tag="header" class="p-1" role="tab">
@@ -267,10 +272,10 @@
                         <b-tab v-bind:title="$t('App')">
                             <b-container>
                                 <h4>{{ $t('Select_App_To_Import') }}:</h4>
-                                <b-row class="mt-4">
-                                    <b-col cols="4" offset="0" offset-md="4" v-for="i in INTEGRATIONS_TD" :value="i.id"
+                                <b-row align-h="center" class="mt-4">
+                                    <b-col cols="12" md="6" v-for="i in INTEGRATIONS_TD" :value="i.id"
                                            v-bind:key="i.id">
-                                        <b-list-group style="max-width: 300px;">
+                                        <b-list-group>
                                             <b-list-group-item class="d-flex align-items-center" v-hover
                                                                style="cursor: pointer"
                                                                v-bind:class="{ 'bg-success': recipe_app === i.id }"
@@ -297,9 +302,9 @@
                                     </b-col>
                                 </b-row>
                                 <b-row class="mt-4">
-                                    <b-col cols="3" v-for="i in INTEGRATIONS_WO" :value="i.id" v-bind:key="i.id"
+                                    <b-col cols="12" md="6" lg="4" xl="3" v-for="i in INTEGRATIONS_WO" :value="i.id" v-bind:key="i.id"
                                            class="mt-1">
-                                        <b-list-group style="max-width: 300px;">
+                                        <b-list-group>
                                             <b-list-group-item class="d-flex align-items-center" v-hover
                                                                style="cursor: pointer"
                                                                v-bind:class="{ 'bg-success': recipe_app === i.id }"
@@ -463,6 +468,7 @@ export default {
             },
             // URL import
             LS_IMPORT_RECENT: 'import_recent_urls', //TODO use central helper to manage all local storage keys (and maybe even access)
+            duplicateWarning: '',
             website_url: '',
             website_url_list: '',
             import_multiple: false,
@@ -509,6 +515,10 @@ export default {
 
         if (urlParams.has("url")) {
             this.website_url = urlParams.get('url')
+            this.loadRecipe(this.website_url)
+        }
+        if (urlParams.has("text")) {
+            this.website_url = urlParams.get('text')
             this.loadRecipe(this.website_url)
         }
     },
@@ -639,6 +649,12 @@ export default {
                     return
                 }
 
+                if ('duplicate' in response.data && response.data['duplicate']) {
+                    this.duplicateWarning = "A recipe with this URL already exists.";
+                } else {
+                    this.duplicateWarning = "";
+                }
+
                 this.loading = false
                 this.recipe_json = response.data['recipe_json'];
 
@@ -665,8 +681,7 @@ export default {
                 if (url !== '') {
                     this.failed_imports.push(url)
                 }
-                StandardToasts.makeStandardToast(this, StandardToasts.FAIL_FETCH, err)
-                throw "Load Recipe Error"
+                StandardToasts.makeStandardToast(this, StandardToasts.FAIL_IMPORT, err)
             })
         },
         /**
@@ -675,12 +690,26 @@ export default {
          */
         autoImport: function () {
             this.collapse_visible.import = true
-            this.website_url_list.split('\n').forEach(r => {
-                this.loadRecipe(r, true, undefined).then((recipe_json) => {
+            let url_list = this.website_url_list.split('\n').filter(x => x.trim() !== '')
+            if (url_list.length > 0) {
+                let url = url_list.shift()
+                this.website_url_list = url_list.join('\n')
+
+
+                this.loadRecipe(url, true, undefined).then((recipe_json) => {
                     this.importRecipe('multi_import', recipe_json, true)
+                    setTimeout(() => {
+                        this.autoImport()
+                    }, 2000)
+                }).catch((err) => {
+
                 })
-            })
-            this.website_url_list = ''
+            } else {
+                this.import_loading = false
+                this.loading = false
+            }
+
+
         },
         /**
          * Import recipes with uploaded files and app integration
@@ -695,8 +724,7 @@ export default {
             axios.post(resolveDjangoUrl('view_import'), formData, {headers: {'Content-Type': 'multipart/form-data'}}).then((response) => {
                 window.location.href = resolveDjangoUrl('view_import_response', response.data['import_id'])
             }).catch((err) => {
-                console.log(err)
-                StandardToasts.makeStandardToast(this, StandardToasts.FAIL_CREATE)
+                StandardToasts.makeStandardToast(this, StandardToasts.FAIL_IMPORT, err)
             })
         },
         /**
@@ -746,6 +774,16 @@ export default {
 </script>
 
 <style>
+
+.warning {
+  color: rgb(255, 149, 0);
+  align-items: center;
+  background-color: #fff4ec;
+  padding: 10px;
+  border: 1px solid rgb(255, 149, 0);
+  border-radius: 5px;
+  margin: 10px 0;
+}
 
 .bounce {
     animation: bounce 0.82s cubic-bezier(0.36, 0.07, 0.19, 0.97) both;

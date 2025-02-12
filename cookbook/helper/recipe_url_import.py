@@ -1,26 +1,44 @@
-import random
 import re
+import traceback
 from html import unescape
-from unicodedata import decomposition
 
 from django.utils.dateparse import parse_duration
 from django.utils.translation import gettext as _
 from isodate import parse_duration as iso_parse_duration
 from isodate.isoerror import ISO8601Error
-from pytube import YouTube
+from pytubefix import YouTube
 from recipe_scrapers._utils import get_host_name, get_minutes
 
-from cookbook.helper import recipe_url_import as helper
+from cookbook.helper.automation_helper import AutomationEngine
 from cookbook.helper.ingredient_parser import IngredientParser
-from cookbook.models import Keyword, Automation
-
-
-# from recipe_scrapers._utils import get_minutes  ## temporary until/unless upstream incorporates get_minutes() PR
+from cookbook.models import Automation, Keyword, PropertyType
 
 
 def get_from_scraper(scrape, request):
-    # converting the scrape_me object to the existing json format based on ld+json
-    recipe_json = {}
+    # converting the scrape_html object to the existing json format based on ld+json
+
+    recipe_json = {'steps': [], 'internal': True}
+    keywords = []
+
+    # assign source URL
+    try:
+        source_url = scrape.canonical_url()
+    except Exception:
+        try:
+            source_url = scrape.url
+        except Exception:
+            pass
+    if source_url == "https://urlnotfound.none" or not source_url:
+        recipe_json['source_url'] = ''
+    else:
+        recipe_json['source_url'] = source_url
+        try:
+            keywords.append(source_url.replace('http://', '').replace('https://', '').split('/')[0])
+        except Exception:
+            recipe_json['source_url'] = ''
+
+    automation_engine = AutomationEngine(request, source=recipe_json.get('source_url'))
+    # assign recipe name
     try:
         recipe_json['name'] = parse_name(scrape.title()[:128] or None)
     except Exception:
@@ -31,6 +49,13 @@ def get_from_scraper(scrape, request):
         except Exception:
             recipe_json['name'] = ''
 
+    if isinstance(recipe_json['name'], list) and len(recipe_json['name']) > 0:
+        recipe_json['name'] = recipe_json['name'][0]
+
+    recipe_json['name'] = automation_engine.apply_regex_replace_automation(recipe_json['name'], Automation.NAME_REPLACE)
+
+    # assign recipe description
+    # TODO notify user about limit if reached - >256 description will be truncated
     try:
         description = scrape.description() or None
     except Exception:
@@ -41,16 +66,20 @@ def get_from_scraper(scrape, request):
         except Exception:
             description = ''
 
-    recipe_json['internal'] = True
+    recipe_json['description'] = parse_description(description)
+    recipe_json['description'] = automation_engine.apply_regex_replace_automation(recipe_json['description'], Automation.DESCRIPTION_REPLACE)
 
+    # assign servings attributes
     try:
-        servings = scrape.schema.data.get('recipeYield') or 1  # dont use scrape.yields() as this will always return "x servings" or "x items", should be improved in scrapers directly
+        # dont use scrape.yields() as this will always return "x servings" or "x items", should be improved in scrapers directly
+        servings = scrape.schema.data.get('recipeYield') or 1
     except Exception:
         servings = 1
 
     recipe_json['servings'] = parse_servings(servings)
     recipe_json['servings_text'] = parse_servings_text(servings)
 
+    # assign time attributes
     try:
         recipe_json['working_time'] = get_minutes(scrape.prep_time()) or 0
     except Exception:
@@ -75,6 +104,7 @@ def get_from_scraper(scrape, request):
             except Exception:
                 pass
 
+    # assign image
     try:
         recipe_json['image'] = parse_image(scrape.image()) or None
     except Exception:
@@ -85,7 +115,7 @@ def get_from_scraper(scrape, request):
         except Exception:
             recipe_json['image'] = ''
 
-    keywords = []
+    # assign keywords
     try:
         if scrape.schema.data.get("keywords"):
             keywords += listify_keywords(scrape.schema.data.get("keywords"))
@@ -111,53 +141,37 @@ def get_from_scraper(scrape, request):
             pass
 
     try:
-        source_url = scrape.canonical_url()
-    except Exception:
-        try:
-            source_url = scrape.url
-        except Exception:
-            pass
-    if source_url:
-        recipe_json['source_url'] = source_url
-        try:
-            keywords.append(source_url.replace('http://', '').replace('https://', '').split('/')[0])
-        except Exception:
-            recipe_json['source_url'] = ''
-
-    try:
         if scrape.author():
             keywords.append(scrape.author())
-    except:
+    except Exception:
         pass
 
     try:
-        recipe_json['keywords'] = parse_keywords(list(set(map(str.casefold, keywords))), request.space)
+        recipe_json['keywords'] = parse_keywords(list(set(map(str.casefold, keywords))), request)
     except AttributeError:
         recipe_json['keywords'] = keywords
 
     ingredient_parser = IngredientParser(request, True)
 
-    recipe_json['steps'] = []
+    # assign steps
     try:
         for i in parse_instructions(scrape.instructions()):
-            recipe_json['steps'].append({'instruction': i, 'ingredients': [], })
+            recipe_json['steps'].append({
+                'instruction': i,
+                'ingredients': [],
+                'show_ingredients_table': request.user.userpreference.show_step_ingredients,
+            })
     except Exception:
         pass
     if len(recipe_json['steps']) == 0:
-        recipe_json['steps'].append({'instruction': '', 'ingredients': [], })
+        recipe_json['steps'].append({
+            'instruction': '',
+            'ingredients': [],
+        })
 
-    parsed_description = parse_description(description)
-    # TODO notify user about limit if reached
-    # limits exist to limit the attack surface for dos style attacks
-    automations = Automation.objects.filter(type=Automation.DESCRIPTION_REPLACE, space=request.space, disabled=False).only('param_1', 'param_2', 'param_3').all().order_by('order')[:512]
-    for a in automations:
-        if re.match(a.param_1, (recipe_json['source_url'])[:512]):
-            parsed_description = re.sub(a.param_2, a.param_3, parsed_description, count=1)
-
-    if len(parsed_description) > 256:  # split at 256 as long descriptions don't look good on recipe cards
-        recipe_json['steps'][0]['instruction'] = f'*{parsed_description}*  \n\n' + recipe_json['steps'][0]['instruction']
-    else:
-        recipe_json['description'] = parsed_description[:512]
+    recipe_json['description'] = recipe_json['description'][:512]
+    if len(recipe_json['description']) > 256:  # split at 256 as long descriptions don't look good on recipe cards
+        recipe_json['steps'][0]['instruction'] = f"*{recipe_json['description']}*  \n\n" + recipe_json['steps'][0]['instruction']
 
     try:
         for x in scrape.ingredients():
@@ -174,31 +188,59 @@ def get_from_scraper(scrape, request):
                         'original_text': x
                     }
                     if unit:
-                        ingredient['unit'] = {'name': unit, }
+                        ingredient['unit'] = {
+                            'name': unit,
+                        }
                     recipe_json['steps'][0]['ingredients'].append(ingredient)
                 except Exception:
-                    recipe_json['steps'][0]['ingredients'].append(
-                        {
-                            'amount': 0,
-                            'unit': None,
-                            'food': {
-                                'name': x,
-                            },
-                            'note': '',
-                            'original_text': x
-                        }
-                    )
+                    recipe_json['steps'][0]['ingredients'].append({
+                        'amount': 0,
+                        'unit': None,
+                        'food': {
+                            'name': x,
+                        },
+                        'note': '',
+                        'original_text': x
+                    })
     except Exception:
         pass
 
-    if recipe_json['source_url']:
-        automations = Automation.objects.filter(type=Automation.INSTRUCTION_REPLACE, space=request.space, disabled=False).only('param_1', 'param_2', 'param_3').order_by('order').all()[:512]
-        for a in automations:
-            if re.match(a.param_1, (recipe_json['source_url'])[:512]):
-                for s in recipe_json['steps']:
-                    s['instruction'] = re.sub(a.param_2, a.param_3, s['instruction'])
+    try:
+        recipe_json['properties'] = get_recipe_properties(request.space, scrape.schema.nutrients())
+        print(recipe_json['properties'])
+    except Exception:
+        traceback.print_exc()
+        pass
+
+    for s in recipe_json['steps']:
+        s['instruction'] = automation_engine.apply_regex_replace_automation(s['instruction'], Automation.INSTRUCTION_REPLACE)
+        # re.sub(a.param_2, a.param_3, s['instruction'])
 
     return recipe_json
+
+
+def get_recipe_properties(space, property_data):
+    # {'servingSize': '1', 'calories': '302 kcal', 'proteinContent': '7,66g', 'fatContent': '11,56g', 'carbohydrateContent': '41,33g'}
+    properties = {
+        "property-calories": "calories",
+        "property-carbohydrates": "carbohydrateContent",
+        "property-proteins": "proteinContent",
+        "property-fats": "fatContent",
+    }
+    recipe_properties = []
+    for pt in PropertyType.objects.filter(space=space, open_data_slug__in=list(properties.keys())).all():
+        for p in list(properties.keys()):
+            if pt.open_data_slug == p:
+                if properties[p] in property_data:
+                    recipe_properties.append({
+                        'property_type': {
+                            'id': pt.id,
+                            'name': pt.name,
+                        },
+                        'property_amount': parse_servings(property_data[properties[p]]) / parse_servings(property_data['servingSize']),
+                    })
+
+    return recipe_properties
 
 
 def get_from_youtube_scraper(url, request):
@@ -212,29 +254,34 @@ def get_from_youtube_scraper(url, request):
         'working_time': 0,
         'waiting_time': 0,
         'image': "",
-        'keywords': [{'name': kw.name, 'label': kw.name, 'id': kw.pk}],
+        'keywords': [{
+            'name': kw.name,
+            'label': kw.name,
+            'id': kw.pk
+        }],
         'source_url': url,
-        'steps': [
-            {
-                'ingredients': [],
-                'instruction': ''
-            }
-        ]
+        'steps': [{
+            'ingredients': [],
+            'instruction': ''
+        }]
     }
 
     try:
-        video = YouTube(url=url)
-        default_recipe_json['name'] = video.title
+        automation_engine = AutomationEngine(request, source=url)
+        video = YouTube(url)
+        video.streams.first()  # this is required to execute some kind of generator/web request that fetches the description
+        default_recipe_json['name'] = automation_engine.apply_regex_replace_automation(video.title, Automation.NAME_REPLACE)
         default_recipe_json['image'] = video.thumbnail_url
-        default_recipe_json['steps'][0]['instruction'] = video.description
+        if video.description:
+            default_recipe_json['steps'][0]['instruction'] = automation_engine.apply_regex_replace_automation(video.description, Automation.INSTRUCTION_REPLACE)
     except Exception:
-        pass
+        traceback.print_exc()
 
     return default_recipe_json
 
 
 def parse_name(name):
-    if type(name) == list:
+    if isinstance(name, list):
         try:
             name = name[0]
         except Exception:
@@ -278,16 +325,16 @@ def parse_instructions(instructions):
     """
     instruction_list = []
 
-    if type(instructions) == list:
+    if isinstance(instructions, list):
         for i in instructions:
-            if type(i) == str:
+            if isinstance(i, str):
                 instruction_list.append(clean_instruction_string(i))
             else:
                 if 'text' in i:
                     instruction_list.append(clean_instruction_string(i['text']))
                 elif 'itemListElement' in i:
                     for ile in i['itemListElement']:
-                        if type(ile) == str:
+                        if isinstance(ile, str):
                             instruction_list.append(clean_instruction_string(ile))
                         elif 'text' in ile:
                             instruction_list.append(clean_instruction_string(ile['text']))
@@ -303,13 +350,13 @@ def parse_image(image):
     # check if list of images is returned, take first if so
     if not image:
         return None
-    if type(image) == list:
+    if isinstance(image, list):
         for pic in image:
-            if (type(pic) == str) and (pic[:4] == 'http'):
+            if (isinstance(pic, str)) and (pic[:4] == 'http'):
                 image = pic
             elif 'url' in pic:
                 image = pic['url']
-    elif type(image) == dict:
+    elif isinstance(image, dict):
         if 'url' in image:
             image = image['url']
 
@@ -320,26 +367,26 @@ def parse_image(image):
 
 
 def parse_servings(servings):
-    if type(servings) == str:
+    if isinstance(servings, str):
         try:
             servings = int(re.search(r'\d+', servings).group())
         except AttributeError:
             servings = 1
-    elif type(servings) == list:
+    elif isinstance(servings, list):
         try:
-            servings = int(re.findall(r'\b\d+\b', servings[0])[0])
-        except KeyError:
+            servings = int(re.findall(r'\b\d+\b', str(servings[0]))[0])
+        except (KeyError, IndexError):
             servings = 1
     return servings
 
 
 def parse_servings_text(servings):
-    if type(servings) == str:
+    if isinstance(servings, str):
         try:
-            servings = re.sub("\d+", '', servings).strip()
+            servings = re.sub("\\d+", '', servings).strip()
         except Exception:
             servings = ''
-    if type(servings) == list:
+    if isinstance(servings, list):
         try:
             servings = parse_servings_text(servings[1])
         except Exception:
@@ -356,7 +403,7 @@ def parse_time(recipe_time):
                 recipe_time = round(iso_parse_duration(recipe_time).seconds / 60)
             except ISO8601Error:
                 try:
-                    if (type(recipe_time) == list and len(recipe_time) > 0):
+                    if (isinstance(recipe_time, list) and len(recipe_time) > 0):
                         recipe_time = recipe_time[0]
                     recipe_time = round(parse_duration(recipe_time).seconds / 60)
                 except AttributeError:
@@ -365,13 +412,18 @@ def parse_time(recipe_time):
     return recipe_time
 
 
-def parse_keywords(keyword_json, space):
+def parse_keywords(keyword_json, request):
     keywords = []
+    automation_engine = AutomationEngine(request)
+
     # keywords as list
     for kw in keyword_json:
         kw = normalize_string(kw)
+        # if alias exists use that instead
+
         if len(kw) != 0:
-            if k := Keyword.objects.filter(name=kw, space=space).first():
+            kw = automation_engine.apply_keyword_automation(kw)
+            if k := Keyword.objects.filter(name__iexact=kw, space=request.space).first():
                 keywords.append({'label': str(k), 'name': k.name, 'id': k.id})
             else:
                 keywords.append({'label': kw, 'name': kw})
@@ -382,15 +434,15 @@ def parse_keywords(keyword_json, space):
 def listify_keywords(keyword_list):
     # keywords as string
     try:
-        if type(keyword_list[0]) == dict:
+        if isinstance(keyword_list[0], dict):
             return keyword_list
     except (KeyError, IndexError):
         pass
-    if type(keyword_list) == str:
+    if isinstance(keyword_list, str):
         keyword_list = keyword_list.split(',')
 
     # keywords as string in list
-    if (type(keyword_list) == list and len(keyword_list) == 1 and ',' in keyword_list[0]):
+    if (isinstance(keyword_list, list) and len(keyword_list) == 1 and ',' in keyword_list[0]):
         keyword_list = keyword_list[0].split(',')
     return [x.strip() for x in keyword_list]
 
@@ -407,10 +459,7 @@ def normalize_string(string):
 
 
 def iso_duration_to_minutes(string):
-    match = re.match(
-        r'P((?P<years>\d+)Y)?((?P<months>\d+)M)?((?P<weeks>\d+)W)?((?P<days>\d+)D)?T((?P<hours>\d+)H)?((?P<minutes>\d+)M)?((?P<seconds>\d+)S)?',
-        string
-    ).groupdict()
+    match = re.match(r'P((?P<years>\d+)Y)?((?P<months>\d+)M)?((?P<weeks>\d+)W)?((?P<days>\d+)D)?T((?P<hours>\d+)H)?((?P<minutes>\d+)M)?((?P<seconds>\d+)S)?', string).groupdict()
     return int(match['days'] or 0) * 24 * 60 + int(match['hours'] or 0) * 60 + int(match['minutes'] or 0)
 
 
@@ -444,13 +493,13 @@ def get_images_from_soup(soup, url):
 
 
 def clean_dict(input_dict, key):
-    if type(input_dict) == dict:
+    if isinstance(input_dict, dict):
         for x in list(input_dict):
             if x == key:
                 del input_dict[x]
-            elif type(input_dict[x]) == dict:
+            elif isinstance(input_dict[x], dict):
                 input_dict[x] = clean_dict(input_dict[x], key)
-            elif type(input_dict[x]) == list:
+            elif isinstance(input_dict[x], list):
                 temp_list = []
                 for e in input_dict[x]:
                     temp_list.append(clean_dict(e, key))

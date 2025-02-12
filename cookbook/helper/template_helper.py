@@ -2,8 +2,9 @@ from gettext import gettext as _
 
 import bleach
 import markdown as md
-from bleach_allowlist import markdown_attrs, markdown_tags
 from jinja2 import Template, TemplateSyntaxError, UndefinedError
+from jinja2.exceptions import SecurityError
+from jinja2.sandbox import SandboxedEnvironment
 from markdown.extensions.tables import TableExtension
 
 from cookbook.helper.mdx_attributes import MarkdownFormatExtension
@@ -15,12 +16,14 @@ class IngredientObject(object):
     unit = ""
     food = ""
     note = ""
+    numeric_amount = 0
 
     def __init__(self, ingredient):
         if ingredient.no_amount:
             self.amount = ""
         else:
             self.amount = f"<scalable-number v-bind:number='{bleach.clean(str(ingredient.amount))}' v-bind:factor='ingredient_factor'></scalable-number>"
+            self.numeric_amount = float(ingredient.amount)
         if ingredient.unit:
             if ingredient.unit.plural_name in (None, ""):
                 self.unit = bleach.clean(str(ingredient.unit))
@@ -53,9 +56,17 @@ class IngredientObject(object):
 def render_instructions(step):  # TODO deduplicate markdown cleanup code
     instructions = step.instruction
 
-    tags = markdown_tags + [
-        'pre', 'table', 'td', 'tr', 'th', 'tbody', 'style', 'thead', 'img'
-    ]
+    tags = {
+        "h1", "h2", "h3", "h4", "h5", "h6",
+        "b", "i", "strong", "em", "tt",
+        "p", "br",
+        "span", "div", "blockquote", "code", "pre", "hr",
+        "ul", "ol", "li", "dd", "dt",
+        "img",
+        "a",
+        "sub", "sup",
+        'pre', 'table', 'td', 'tr', 'th', 'tbody', 'style', 'thead'
+    }
     parsed_md = md.markdown(
         instructions,
         extensions=[
@@ -63,7 +74,11 @@ def render_instructions(step):  # TODO deduplicate markdown cleanup code
             UrlizeExtension(), MarkdownFormatExtension()
         ]
     )
-    markdown_attrs['*'] = markdown_attrs['*'] + ['class', 'width', 'height']
+    markdown_attrs = {
+        "*": ["id", "class", 'width', 'height'],
+        "img": ["src", "alt", "title"],
+        "a": ["href", "alt", "title"],
+    }
 
     instructions = bleach.clean(parsed_md, tags, markdown_attrs)
 
@@ -72,12 +87,17 @@ def render_instructions(step):  # TODO deduplicate markdown cleanup code
     for i in step.ingredients.all():
         ingredients.append(IngredientObject(i))
 
+    def scale(number):
+        return f"<scalable-number v-bind:number='{bleach.clean(str(number))}' v-bind:factor='ingredient_factor'></scalable-number>"
+
     try:
-        template = Template(instructions)
-        instructions = template.render(ingredients=ingredients)
+        env = SandboxedEnvironment()
+        instructions = env.from_string(instructions).render(ingredients=ingredients, scale=scale)
     except TemplateSyntaxError:
         return _('Could not parse template code.') + ' Error: Template Syntax broken'
     except UndefinedError:
         return _('Could not parse template code.') + ' Error: Undefined Error'
+    except SecurityError:
+        return _('Could not parse template code.') + ' Error: Security Error'
 
     return instructions

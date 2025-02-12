@@ -7,7 +7,7 @@ from cookbook.helper.image_processing import get_filetype
 from cookbook.helper.ingredient_parser import IngredientParser
 from cookbook.helper.recipe_url_import import parse_servings, parse_servings_text, parse_time
 from cookbook.integration.integration import Integration
-from cookbook.models import Ingredient, Recipe, Step
+from cookbook.models import Ingredient, Keyword, Recipe, Step
 
 
 class Mealie(Integration):
@@ -25,7 +25,7 @@ class Mealie(Integration):
             created_by=self.request.user, internal=True, space=self.request.space)
 
         for s in recipe_json['recipe_instructions']:
-            step = Step.objects.create(instruction=s['text'], space=self.request.space, )
+            step = Step.objects.create(instruction=s['text'], space=self.request.space, show_ingredients_table=self.request.user.userpreference.show_step_ingredients, )
             recipe.steps.add(step)
 
         step = recipe.steps.first()
@@ -56,6 +56,12 @@ class Mealie(Integration):
             except Exception:
                 pass
 
+        if 'tags' in recipe_json and len(recipe_json['tags']) > 0:
+            for k in recipe_json['tags']:
+                if 'name' in k:
+                    keyword, created = Keyword.objects.get_or_create(name=k['name'].strip(), space=self.request.space)
+                    recipe.keywords.add(keyword)
+
         if 'notes' in recipe_json and len(recipe_json['notes']) > 0:
             notes_text = "#### Notes  \n\n"
             for n in recipe_json['notes']:
@@ -66,14 +72,14 @@ class Mealie(Integration):
             )
             recipe.steps.add(step)
 
-        if 'recipe_yield' in recipe_json:
+        if 'recipe_yield' in recipe_json and recipe_json['recipe_yield'] is not None:
             recipe.servings = parse_servings(recipe_json['recipe_yield'])
             recipe.servings_text = parse_servings_text(recipe_json['recipe_yield'])
 
         if 'total_time' in recipe_json and recipe_json['total_time'] is not None:
             recipe.working_time = parse_time(recipe_json['total_time'])
 
-        if 'org_url' in recipe_json:
+        if 'org_url' in recipe_json and recipe_json['org_url'] is not None:
             recipe.source_url = recipe_json['org_url']
 
         recipe.save()
